@@ -1,0 +1,4 @@
+OPTIONS https://proxy.imbcargo-montenegro.com/proxy?url=https://statusm.me/wp-content/uploads/2025/01/status4.jpg
+Origin: http://127.0.0.1:5500
+Access-Control-Request-Method: GET
+Access-Control-Request-Headers: User-Agent

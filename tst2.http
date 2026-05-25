@@ -1,0 +1,4 @@
+OPTIONS https://checkpoint.imbcargo-montenegro.com/checkpoint/images
+Origin: http://127.0.0.1:5500
+Access-Control-Request-Method: POST
+Access-Control-Request-Headers: Content-Type, X-API-Key

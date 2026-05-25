@@ -10,6 +10,7 @@ const ALLOWED_ORIGINS = [
     'http://localhost:8080',                         // Local Node.js proxy
     'http://127.0.0.1:4200',
     'http://127.0.0.1:8787',
+    'http://127.0.0.1:5500'
 ];
 
 // Helper: Check if request is from local development
@@ -21,6 +22,8 @@ function isLocalRequest(host) {
         host === 'localhost:4200' ||
         host === '127.0.0.1:4200' ||
         host === 'localhost:8080' ||
+        host === 'localhost:5500' ||
+        host === '127.0.0.1:5500' ||
         host === '127.0.0.1:8080';
 }
 
@@ -75,7 +78,7 @@ export default {
         const corsHeaders = {
             'Access-Control-Allow-Origin': allowedOrigin && origin ? origin : '*',
             'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Allow-Headers': 'Content-Type, User-Agent, Cache-Control, Accept, Accept-Language, Accept-Encoding, Connection, Upgrade-Insecure-Requests, Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site, Sec-Fetch-User',
             'Access-Control-Max-Age': '86400',
             'X-Request-ID': requestId,
         };
@@ -83,7 +86,15 @@ export default {
         // Handle CORS preflight
         if (method === 'OPTIONS') {
             console.log(`[${requestId}] [CORS] Preflight response sent`);
-            return new Response(null, { status: 204, headers: corsHeaders });
+            return new Response(null, {
+                status: 204,
+                headers: {
+                    'Access-Control-Allow-Origin': allowedOrigin && origin ? origin : '*',
+                    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+                    'Access-Control-Allow-Headers': 'Content-Type, User-Agent, Cache-Control, Accept, Accept-Language, Accept-Encoding, Connection, Upgrade-Insecure-Requests, Sec-Fetch-Dest, Sec-Fetch-Mode, Sec-Fetch-Site, Sec-Fetch-User',
+                    'Access-Control-Max-Age': '86400',
+                }
+            });
         }
 
         // Health check endpoint (public - no CORS restriction needed)
@@ -144,11 +155,14 @@ export default {
             }
 
             // Security: Only allow statusm.me domain
-            if (!targetUrl.includes('statusm.me')) {
+            const allowedDomains = ['statusm.me', 'picsum.photos', 'localhost'];
+            const isAllowed = allowedDomains.some(domain => targetUrl.includes(domain));
+            if (!isAllowed) {
                 console.log(`[${requestId}] [PROXY] BLOCKED - Only statusm.me allowed: ${targetUrl.substring(0, 80)}`);
                 return new Response(JSON.stringify({
                     success: false,
-                    error: 'Only statusm.me domain is allowed',
+                    error: 'Only statusm.me domain is allowed for production images. Test domains: picsum.photos',
+                    allowedDomains: allowedDomains,
                     requestId
                 }), {
                     status: 403,
@@ -156,18 +170,44 @@ export default {
                 });
             }
 
+            // ADD THIS: Cookie storage for session persistence
+            // Store cookies between requests (simple in-memory for this worker instance)
+            if (!globalThis._cookieJar) {
+                globalThis._cookieJar = '';
+            }
+
             try {
                 console.log(`[${requestId}] [PROXY] Fetching: ${targetUrl.substring(0, 80)}...`);
 
+                // UPDATED: Better browser-like headers with cookie support
                 const response = await fetch(targetUrl, {
                     headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.9',
-                        'Referer': 'https://statusm.me/',
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9,ru;q=0.8',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'Referer': 'https://www.google.com/',
                         'Origin': 'https://statusm.me',
+                        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                        'Sec-Ch-Ua-Mobile': '?0',
+                        'Sec-Ch-Ua-Platform': '"Windows"',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Cache-Control': 'max-age=0',
+                        'Cookie': globalThis._cookieJar,  // ADD THIS: Send stored cookies
                     }
                 });
+
+                // ADD THIS: Save cookies from response for future requests
+                const setCookie = response.headers.get('set-cookie');
+                if (setCookie) {
+                    const cookieValue = setCookie.split(';')[0];
+                    globalThis._cookieJar = cookieValue;
+                    console.log(`[${requestId}] [PROXY] Cookie saved: ${cookieValue.substring(0, 50)}...`);
+                }
 
                 if (!response.ok) {
                     console.log(`[${requestId}] [PROXY] Failed: HTTP ${response.status}`);
@@ -182,6 +222,33 @@ export default {
                 }
 
                 const contentType = response.headers.get('Content-Type') || 'image/jpeg';
+
+                // For HTML responses, log first 200 chars for debugging
+                if (contentType.includes('text/html')) {
+                    const text = await response.text();
+                    // Check if it's a Cloudflare challenge page
+                    if (text.includes('cf-browser-verification') || text.includes('challenge') || text.includes('__cf_chl')) {
+                        console.log(`[${requestId}] [PROXY] CLOUDFLARE CHALLENGE DETECTED!`);
+                        return new Response(JSON.stringify({
+                            success: false,
+                            error: 'Cloudflare challenge detected - statusm.me is blocking this proxy',
+                            requestId
+                        }), {
+                            status: 403,
+                            headers: { 'Content-Type': 'application/json', ...corsHeaders }
+                        });
+                    }
+                    return new Response(text, {
+                        status: 200,
+                        headers: {
+                            'Content-Type': contentType,
+                            'Cache-Control': 'public, max-age=86400',
+                            'X-Cache-Source': 'prus-api4',
+                            ...corsHeaders,
+                        }
+                    });
+                }
+
                 const imageData = await response.arrayBuffer();
 
                 console.log(`[${requestId}] [PROXY] Success: ${imageData.byteLength} bytes (${contentType})`);
@@ -207,6 +274,57 @@ export default {
                     headers: { 'Content-Type': 'application/json', ...corsHeaders }
                 });
             }
+        }
+
+        // Diagnostic endpoint - shows why requests fail
+        if (url.pathname === '/proxy/diagnostic' && method === 'GET') {
+            const targetUrl = url.searchParams.get('url');
+
+            if (!targetUrl) {
+                return new Response(JSON.stringify({
+                    success: false,
+                    error: 'Missing url parameter',
+                    usage: '/proxy/diagnostic?url=https://example.com/image.jpg'
+                }), { status: 400, headers: corsHeaders });
+            }
+
+            const diagnostics = {
+                requestId,
+                timestamp: new Date().toISOString(),
+                targetUrl: targetUrl,
+                checks: {
+                    urlFormat: {
+                        passed: true,
+                        message: 'URL parameter provided'
+                    },
+                    domainCheck: {
+                        passed: targetUrl.includes('statusm.me') || targetUrl.includes('picsum.photos'),
+                        message: targetUrl.includes('statusm.me') ? 'Domain allowed (statusm.me)' :
+                            (targetUrl.includes('picsum.photos') ? 'Domain allowed (picsum.photos - test only)' :
+                                'Domain not allowed - only statusm.me for production, picsum.photos for testing'),
+                        allowedDomains: ['statusm.me', 'picsum.photos']
+                    },
+                    methodCheck: {
+                        passed: method === 'GET',
+                        message: method === 'GET' ? 'GET method allowed' : `Method ${method} not allowed`
+                    },
+                    corsCheck: {
+                        origin: origin,
+                        isAllowed: allowedOrigin,
+                        message: allowedOrigin ? 'CORS allowed' : 'CORS would block this request'
+                    }
+                },
+                suggestedFix: null
+            };
+
+            if (!diagnostics.checks.domainCheck.passed) {
+                diagnostics.suggestedFix = 'Use a statusm.me URL or update allowedDomains in worker code';
+            }
+
+            return new Response(JSON.stringify(diagnostics, null, 2), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
         }
 
         // 404 for any other path
